@@ -1,0 +1,142 @@
+---
+name: obsidian-video-notes
+description: |
+  根据视频原路径递归扫描本地视频和 SRT，在用户首次指定的 Obsidian Vault 中自动创建独立的视频笔记文件夹、Markdown 笔记和指向原视频的软链接。笔记包含标题、带时间戳的核心总结表格和正文，严格校验 SRT 时间、Obsidian 媒体链接、中文字幕匹配、冲突保护和幂等更新。用户要求整理视频课程、批量生成 Obsidian 视频笔记、同步字幕或调用 $obsidian-video-notes 时使用。
+---
+
+# Obsidian Video Notes
+
+## 工作边界
+
+本 Skill 可以写入真实 Obsidian Vault，但只允许写入首次由用户明确配置的独立笔记文件夹。不得扫描、修改、复制、移动或删除 Vault 中的其他笔记、MOC、日志或媒体文件。不得猜测 Vault 路径；配置不存在时先询问。
+
+默认生成目录是 `<Vault>/视频笔记/`，媒体软链接目录是 `<Vault>/视频笔记/媒体/`。配置保存在本 Skill 目录下的 `config.json`，只保存 Vault 路径、相对文件夹和字幕语言，不保存凭据。
+
+如果用户只要求返回 Markdown，不执行 Vault 同步；如果用户提供视频原路径并要求自动生成，则执行完整扫描、生成、校验和提交流程。
+
+## 自动同步流程
+
+### 1. 首次配置
+
+如果 `config.json` 不存在，询问用户提供真实 Obsidian Vault 根路径。Vault 必须已经存在且是目录。默认使用以下配置：
+
+```json
+{
+  "vault_root": "/用户提供的/Vault",
+  "notes_folder": "视频笔记",
+  "media_folder": "媒体",
+  "subtitle_language": "zh"
+}
+```
+
+使用以下命令保存配置；不要把真实路径写进 Skill 源码：
+
+```bash
+python3 scripts/obsidian_vault_sync.py configure \
+  --vault "/用户提供的/Vault"
+```
+
+### 2. 扫描视频和 SRT
+
+用户提供一个视频原路径后，调用：
+
+```bash
+python3 scripts/obsidian_vault_sync.py scan \
+  "/用户提供的视频原路径" \
+  --output "/临时目录/manifest.json"
+```
+
+输入可以是单个视频文件或目录。单个视频文件会扫描其所在目录及子目录；目录输入会递归扫描该目录。不要跟随软链接扫描，不要扫描已经生成的媒体目录。
+
+支持 `.mp4`、`.mkv`、`.mov`、`.webm`、`.m4v` 和 `.avi`。用户给出不带扩展名且对应的 `.mp4` 文件存在时，默认补充 `.mp4`；不要把自然语言标题虚构为不存在的路径。
+
+每个视频只在同目录查找 SRT。优先选择完全同名的 `<视频名>.srt`；不存在时再选择唯一的 `<视频名>.zh.srt`、`<视频名>_zh.srt`、`<视频名>-zh.srt`、`<视频名>.中文.srt` 等中文后缀文件。多个候选无法唯一判断时跳过并报告；没有匹配字幕时不生成空笔记。
+
+### 3. 生成笔记
+
+对 manifest 中 `status: ready` 的项目读取对应 SRT，按视频原始顺序整理内容。SRT 每条字幕的起始时间是该语义内容的可用时间点。将相邻字幕合并成自然完整段落，但不要把每句字幕单独换行，也不要补充字幕没有提供的事实。
+
+总结框架读取 [summary-frameworks.md](./references/summary-frameworks.md)，根据视频内容选择一个主框架。默认提炼 3–5 个互不重复的核心知识点。
+
+生成 Markdown 时严格使用以下结构：
+
+```markdown
+# 标题
+
+## 核心总结
+
+| 总结维度 | 核心知识点 | 时间戳 |
+| --- | --- | --- |
+| 是什么 | 简短、可核验的核心结论。 | [[媒体/视频.mp4#t=251|04:11]] |
+
+## 正文
+
+[[媒体/视频.mp4#t=251|04:11]]
+
+对应的自然完整正文段落。
+```
+
+标题使用视频文件名去除扩展名后的原始名称。只保留三个顶层结构：标题、`## 核心总结` 和 `## 正文`。正文内部可以使用少量 `###` 主题小标题，但不得创建其他 `##` 顶层章节。不要生成 YAML frontmatter、底部总结、操作日志或解释性文字。
+
+正文中的时间戳必须单独占一行，下一段再写正文。时间戳不能放入任何标题。默认不使用项目符号或编号列表；将字幕中的清单改写成连续自然段。时间戳应放在最能支撑该段内容的语义段落之前，不要机械重复章节起点。
+
+专业名词首次出现时必须同时提供英文说明，格式为“中文（English）”。适用范围包括技术概念、编程语言、算法、模型、方法论、开发框架、协议、行业术语和关键缩写，例如“监督学习（Supervised learning）”“应用程序接口（Application Programming Interface，API）”“分布式内存计算框架（Distributed in-memory computing framework）”。如果术语本身是英文品牌、产品名或项目名，则保留官方英文名称；已经在中文中约定俗成且没有稳定英文对应词的普通词语不强行翻译。后续再次出现同一术语时可以只使用中文或缩写，但首次定义必须完整。
+
+### 4. 时间戳规则
+
+时间链接使用媒体相对路径，并严格遵守：
+
+```markdown
+[[媒体/相对目录/视频文件名.mp4#t=整数秒|显示时间]]
+```
+
+SRT 起始时间转换为整数秒：毫秒低于 `.500` 向下取整，`.500` 及以上向上取整。链接显示时间必须与整数秒完全一致。一小时以内使用 `MM:SS`，一小时及以上使用 `HH:MM:SS`。例如 `00:04:11,500` 必须写成 `[[媒体/视频.mp4#t=252|04:12]]`。
+
+### 5. 提交到 Vault
+
+把每篇已生成 Markdown 放入临时内容目录后，先运行：
+
+```bash
+python3 scripts/validate_note.py \
+  --require-template \
+  --allow-generated-markers \
+  "/临时目录/笔记.md"
+```
+
+所有笔记通过校验后，再调用：
+
+```bash
+python3 scripts/obsidian_vault_sync.py commit \
+  --manifest "/临时目录/manifest.json" \
+  --content-dir "/临时目录/notes"
+```
+
+脚本会在 Vault 中创建笔记和媒体目录，并用绝对源路径创建软链接，不复制视频文件。媒体链接目标形如 `媒体/章节/视频.mp4`，保留视频原始文件名和目录层级。
+
+## 幂等更新和冲突保护
+
+新笔记使用隐藏的 Codex 标记区分自动生成区域：
+
+```markdown
+## 核心总结
+
+<!-- codex:video-note-summary:start -->
+自动生成的总结表格
+<!-- codex:video-note-summary:end -->
+
+## 正文
+
+<!-- codex:video-note-body:start -->
+自动生成的正文
+<!-- codex:video-note-body:end -->
+```
+
+重复运行时，缺少笔记或软链接则创建；正确的现有软链接保持不变；错误软链接和普通文件不覆盖。已有笔记只有在同时包含完整 Codex 标记时才更新，更新时仅替换标记区域，区域外的人工内容保留。没有标记的旧笔记视为人工笔记，跳过并报告冲突。
+
+任何一个项目的字幕不明确、笔记目标冲突、软链接目标冲突或 Markdown 校验失败，都必须在最终报告中说明。不得虚构时间、视频文件名或字幕内容。
+
+## 最终检查
+
+使用 [validate_note.py](./scripts/validate_note.py) 检查标题顺序、核心总结表格、正文位置、时间戳秒数、显示时间、标题时间范围、列表语法和生成标记。使用 [obsidian_vault_sync.py](./scripts/obsidian_vault_sync.py) 的扫描和提交结果检查创建、更新、跳过和冲突项目。
+
+Skill 本身完成修改后，运行 `quick_validate.py` 检查 Skill frontmatter 和目录结构；再使用临时 Vault、临时视频文件、多个 SRT 和重复运行场景进行端到端验证。
