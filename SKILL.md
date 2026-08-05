@@ -26,6 +26,17 @@ description: |
 
 批量更新时只替换 `codex:video-note-summary` 和 `codex:video-note-body` 两个自动区域，不覆盖没有完整标记的旧笔记，也不覆盖普通文件或指向其他源文件的软链接。用户选择 Resource 模板时，再使用 `scripts/apply_resource_template.py` 只更新 frontmatter，不触碰正文和时间戳。核心总结保持 3–5 行表格；表格内的 Obsidian 时间戳必须把显示时间分隔符写成 `\\|`，正文内必须使用标准 `|`。所有生成内容先逐篇运行 `validate_note.py`，再提交到 Vault；提交后复查笔记数量、软链接目标、表格链接、正文链接、标题结构和 frontmatter 标签。
 
+Resource 模板迁移示例：
+
+```bash
+python3 scripts/apply_resource_template.py \
+  "/用户 Vault/视频笔记" \
+  --expected-count 31 \
+  --topic "用户确认的 Topic" \
+  --subject "用户确认的 Subject" \
+  --status fruit
+```
+
 批量更新只允许写入配置的 `notes_folder` 及其 `media_folder`，不得修改扫描源视频、SRT、Vault 中的重复目录或其他笔记目录。重复运行必须是幂等的，不生成重复文件或重复段落。Vault 如果启用了会自动维护 `created`/`updated` 等字段的外部插件，应将其视为 Vault 自动元数据；Skill 不主动新增这些字段，也不把它们当作人工正文区域覆盖。
 
 ## 自动同步流程
