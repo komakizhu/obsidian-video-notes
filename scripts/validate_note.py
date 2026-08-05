@@ -10,9 +10,9 @@ from pathlib import Path
 
 
 LINK_PATTERN = re.compile(
-    r"\[\[([^\]\n#]+)#t=(\d+)\|((?:\d{2}:)?\d{2}:\d{2})\]\]"
+    r"\[\[([^\n#]+)#t=(\d+)(?:\\)?\|((?:\d{2}:)?\d{2}:\d{2})\]\]"
 )
-LINK_CANDIDATE_PATTERN = re.compile(r"\[\[[^\]\n]*#t=[^\]\n]*\]\]")
+LINK_CANDIDATE_PATTERN = re.compile(r"\[\[[^\n]*#t=[^\n]*\]\]")
 TIME_TOKEN = r"(?:\d{1,2}:)?\d{1,3}:\d{2}"
 RANGE_PATTERN = re.compile(
     rf"(?<!\d){TIME_TOKEN}\s*(?:-|–|—|~|至)\s*{TIME_TOKEN}(?!\d)"

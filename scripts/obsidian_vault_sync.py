@@ -22,12 +22,16 @@ except ImportError:  # pragma: no cover - supports direct module loading
 DEFAULT_NOTES_FOLDER = "视频笔记"
 DEFAULT_MEDIA_FOLDER = "媒体"
 DEFAULT_SUBTITLE_LANGUAGE = "zh"
+DEFAULT_TAGS: list[str] = []
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi"}
 CHINESE_SUFFIXES = (".zh", "_zh", "-zh", ".zh-cn", "_zh-cn", "-zh-cn", ".中文", "_中文", "-中文")
 SUMMARY_START = "<!-- codex:video-note-summary:start -->"
 SUMMARY_END = "<!-- codex:video-note-summary:end -->"
 BODY_START = "<!-- codex:video-note-body:start -->"
 BODY_END = "<!-- codex:video-note-body:end -->"
+TABLE_TIMESTAMP_LINK_PATTERN = re.compile(
+    r"\[\[([^\n#]+)#t=(\d+)(?:\\)?\|((?:\d{2}:)?\d{2}:\d{2})\]\]"
+)
 SRT_START_PATTERN = re.compile(
     r"^(?P<start>\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}"
 )
@@ -69,6 +73,12 @@ def load_config(path: Path) -> dict[str, Any]:
     data["subtitle_language"] = str(
         data.get("subtitle_language", DEFAULT_SUBTITLE_LANGUAGE)
     )
+    raw_tags = data.get("tags", DEFAULT_TAGS)
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]
+    if not isinstance(raw_tags, list):
+        raise ValueError("tags must be a list of strings")
+    data["tags"] = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
     return data
 
 
@@ -98,6 +108,7 @@ def configure(args: argparse.Namespace) -> int:
         "notes_folder": notes_folder,
         "media_folder": media_folder,
         "subtitle_language": args.subtitle_language,
+        "tags": [str(tag).strip() for tag in args.tags if str(tag).strip()],
     }
     write_json_atomic(config_path, data)
     print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -165,11 +176,43 @@ def exact_srt_candidate(video: Path, srt: Path) -> bool:
     return srt.name.casefold() == f"{video.stem.casefold()}.srt"
 
 
-def match_srt(video: Path) -> tuple[Path | None, str | None]:
-    candidates = sorted(
-        [path for path in video.parent.iterdir() if path.is_file() and path.suffix.lower() == ".srt"],
-        key=lambda p: str(p),
+def embedded_srt_candidate(video: Path, srt: Path) -> bool:
+    stem = video.stem.casefold()
+    stems = {stem}
+    shortened = re.sub(r"(?:[ _-])chinese(?:[ _-])translated$", "", stem)
+    if shortened != stem:
+        stems.add(shortened)
+    name = srt.name.casefold()
+    return any(
+        token in name
+        for candidate in stems
+        for token in (f"【{candidate}】", f"[{candidate}]", f"({candidate})")
     )
+
+
+def chinese_language_srt(srt: Path) -> bool:
+    name = srt.name.casefold()
+    return bool(re.search(r"(?:中文|chinese|(?:[._-])zh(?:[._-]|$))", name))
+
+
+def subtitle_candidates(video: Path, root: Path) -> list[Path]:
+    directories: list[Path] = [video.parent, root / "srt", root / "subtitles", root / "字幕"]
+    if video.parent != root:
+        directories.extend([video.parent / "srt", video.parent / "subtitles", video.parent / "字幕"])
+
+    candidates: dict[str, Path] = {}
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if path.is_symlink() or not path.is_file() or path.suffix.lower() != ".srt":
+                continue
+            candidates[str(path.resolve())] = path
+    return sorted(candidates.values(), key=lambda p: str(p))
+
+
+def match_srt(video: Path, root: Path) -> tuple[Path | None, str | None]:
+    candidates = subtitle_candidates(video, root)
     exact = [path for path in candidates if exact_srt_candidate(video, path)]
     if len(exact) == 1:
         return exact[0], None
@@ -181,6 +224,15 @@ def match_srt(video: Path) -> tuple[Path | None, str | None]:
         return chinese[0], None
     if len(chinese) > 1:
         return None, "multiple Chinese SRT files found"
+
+    embedded = [path for path in candidates if embedded_srt_candidate(video, path)]
+    if len(embedded) == 1:
+        return embedded[0], None
+    if len(embedded) > 1:
+        embedded_chinese = [path for path in embedded if chinese_language_srt(path)]
+        if len(embedded_chinese) == 1:
+            return embedded_chinese[0], None
+        return None, "multiple SRT files contain the video title"
     return None, "matching SRT not found"
 
 
@@ -207,7 +259,7 @@ def relative_posix(path: Path, root: Path) -> str:
 
 
 def build_item(video: Path, root: Path, config: dict[str, Any]) -> dict[str, Any]:
-    srt_path, reason = match_srt(video)
+    srt_path, reason = match_srt(video, root)
     srt_timestamps: list[int] = []
     if srt_path:
         try:
@@ -262,6 +314,7 @@ def scan(args: argparse.Namespace) -> int:
             "vault_root": config["vault_root"],
             "notes_folder": config["notes_folder"],
             "media_folder": config["media_folder"],
+            "tags": config.get("tags", DEFAULT_TAGS),
             "scan_root": str(root),
             "items": items,
         }
@@ -301,6 +354,32 @@ def inject_markers(markdown: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def escape_table_timestamp_links(markdown: str) -> str:
+    """Escape the display-time pipe only inside the core-summary table.
+
+    Obsidian wikilinks use ``|`` to separate the display label, while Markdown
+    tables also use it as a cell separator.  Escaping that one pipe keeps the
+    complete wikilink in a single table cell.  Body links intentionally remain
+    in their standard, unescaped form.
+    """
+    lines = markdown.splitlines()
+    summary = line_index(lines, "## 核心总结")
+    body = line_index(lines, "## 正文")
+    if summary < 0 or body < 0 or body <= summary:
+        raise ValueError("generated note must contain ## 核心总结 before ## 正文")
+
+    for index in range(summary + 1, body):
+        if not lines[index].lstrip().startswith("|"):
+            continue
+
+        def replace(match: re.Match[str]) -> str:
+            filename, seconds, label = match.groups()
+            return f"[[{filename}#t={seconds}\\|{label}]]"
+
+        lines[index] = TABLE_TIMESTAMP_LINK_PATTERN.sub(replace, lines[index])
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def replace_marker_block(existing: str, generated: str, start: str, end: str) -> str:
     start_existing = existing.find(start)
     end_existing = existing.find(end)
@@ -310,6 +389,37 @@ def replace_marker_block(existing: str, generated: str, start: str, end: str) ->
         raise ValueError("generated marker block is incomplete")
     replacement = generated[start_generated : end_generated + len(end)]
     return existing[:start_existing] + replacement + existing[end_existing + len(end) :]
+
+
+def upsert_tags_frontmatter(markdown: str, tags: list[str]) -> str:
+    """Add or replace the generated tag list without changing note body content."""
+    tags = [str(tag).strip() for tag in tags if str(tag).strip()]
+    if not tags:
+        return markdown
+
+    tag_lines = ["tags:"] + [f"  - {tag}" for tag in tags]
+    lines = markdown.splitlines()
+    if lines and lines[0].strip() == "---":
+        try:
+            closing = next(index for index in range(1, len(lines)) if lines[index].strip() == "---")
+        except StopIteration as exc:
+            raise ValueError("YAML frontmatter has no closing delimiter") from exc
+        frontmatter = lines[1:closing]
+        tag_index = next(
+            (index for index, line in enumerate(frontmatter) if re.match(r"^tags:\s*$", line)),
+            None,
+        )
+        if tag_index is None:
+            frontmatter.extend(tag_lines)
+        else:
+            end = tag_index + 1
+            while end < len(frontmatter) and re.match(r"^\s+-\s+", frontmatter[end]):
+                end += 1
+            frontmatter[tag_index:end] = tag_lines
+        result = ["---", *frontmatter, "---", *lines[closing + 1 :]]
+    else:
+        result = ["---", *tag_lines, "---", *lines]
+    return "\n".join(result).rstrip() + "\n"
 
 
 def merge_note(existing: str | None, generated: str) -> tuple[str, str]:
@@ -333,17 +443,23 @@ def write_text_atomic(path: Path, text: str) -> None:
 
 
 def safe_target(root: Path, relative: str) -> Path:
-    target = (root / Path(relative)).resolve()
-    if not is_inside(target, root):
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
         raise ValueError(f"target escapes configured root: {relative}")
-    return target
+    # Do not resolve the final path component here: an existing media symlink
+    # intentionally resolves outside the Vault to the original video.  The
+    # commit path checks that symlink target separately.
+    return root / relative_path
 
 
-def read_generated_content(content_root: Path, item: dict[str, Any]) -> str:
+def read_generated_content(content_root: Path, item: dict[str, Any], tags: list[str]) -> str:
     content_path = safe_target(content_root, item["note_relative"])
     if not content_path.is_file():
         raise ValueError(f"generated Markdown is missing: {content_path}")
-    return inject_markers(content_path.read_text(encoding="utf-8"))
+    markdown = content_path.read_text(encoding="utf-8")
+    markdown = upsert_tags_frontmatter(markdown, tags)
+    markdown = inject_markers(markdown)
+    return escape_table_timestamp_links(markdown)
 
 
 def validate_source_timestamps(markdown: str, item: dict[str, Any]) -> list[str]:
@@ -390,8 +506,13 @@ def commit(args: argparse.Namespace) -> int:
             source = Path(item["video_path"]).expanduser().resolve()
             note_target = safe_target(notes_root, item["note_relative"])
             media_target = safe_target(media_root, item["media_relative"])
-            generated = read_generated_content(content_root, item)
-            errors = validate(generated, require_template=True, allow_generated_markers=True)
+            generated = read_generated_content(content_root, item, manifest.get("tags", []))
+            errors = validate(
+                generated,
+                allow_frontmatter=True,
+                require_template=True,
+                allow_generated_markers=True,
+            )
             errors.extend(validate_source_timestamps(generated, item))
             if errors:
                 raise ValueError(f"invalid generated note for {item['video_path']}: {'; '.join(errors)}")
@@ -401,6 +522,7 @@ def commit(args: argparse.Namespace) -> int:
             except ValueError as exc:
                 report["conflicts"].append({"video": item["video_path"], "target": str(note_target), "reason": str(exc)})
                 continue
+            merged = upsert_tags_frontmatter(merged, manifest.get("tags", []))
             if os.path.lexists(media_target):
                 if not media_target.is_symlink() or media_target.resolve() != source:
                     report["conflicts"].append({"video": item["video_path"], "target": str(media_target), "reason": "media target exists and is not the expected symlink"})
@@ -442,6 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure_parser.add_argument("--notes-folder", default=DEFAULT_NOTES_FOLDER)
     configure_parser.add_argument("--media-folder", default=DEFAULT_MEDIA_FOLDER)
     configure_parser.add_argument("--subtitle-language", default=DEFAULT_SUBTITLE_LANGUAGE)
+    configure_parser.add_argument("--tag", dest="tags", action="append", default=[])
     configure_parser.set_defaults(handler=configure)
 
     scan_parser = subparsers.add_parser("scan")
