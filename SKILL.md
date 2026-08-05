@@ -1,7 +1,7 @@
 ---
 name: obsidian-video-notes
 description: |
-  根据视频原路径递归扫描本地视频和 SRT，在用户首次指定的 Obsidian Vault 中自动创建独立的视频笔记文件夹、Markdown 笔记和指向原视频的软链接。笔记包含标题、带时间戳的核心总结表格和正文，严格校验 SRT 时间、Obsidian 媒体链接、中文字幕匹配、冲突保护和幂等更新。用户要求整理视频课程、批量生成 Obsidian 视频笔记、同步字幕或调用 $obsidian-video-notes 时使用。
+  根据视频原路径递归扫描本地视频和 SRT，在用户首次指定的 Obsidian Vault 中自动创建独立的视频笔记文件夹、Markdown 笔记和指向原视频的软链接。笔记包含标题、带时间戳的核心总结表格和正文，支持 Resource 通用模板与自定义 tags，并严格校验 SRT 时间、Obsidian 媒体链接、中文字幕匹配、冲突保护和幂等更新。用户要求整理视频课程、批量生成 Obsidian 视频笔记、同步字幕或调用 $obsidian-video-notes 时使用。
 ---
 
 # Obsidian Video Notes
@@ -14,11 +14,17 @@ description: |
 
 如果用户只要求返回 Markdown，不执行 Vault 同步；如果用户提供视频原路径并要求自动生成，则执行完整扫描、生成、校验和提交流程。
 
+## 生成前确认
+
+每次新建或批量更新笔记前，先向用户确认两个选项：第一，是否需要套用笔记模板；如果需要，询问模板文件路径或模板名称，用户选择 Resource 时读取 [resource-template.md](./references/resource-template.md)，不要擅自猜测 `Topic`、`Subject` 或 `status`。第二，是否需要自定义 tags；如果需要，要求用户提供完整 tag 列表并按原样写入；如果不需要，新笔记使用已保存的默认 tags，已有笔记保留原 tags。用户明确选择“不使用模板”时，只生成 Skill 规定的最小 Markdown 结构。
+
+模板和 tags 是两个独立选项：用户可以使用 Resource 模板但保留已有 tags，也可以不使用模板但指定自定义 tags。若用户没有回答，暂停写入并继续询问，不生成猜测性的 frontmatter 或分类字段。
+
 ## 既有笔记批量更新 SOP
 
 当用户要求更新已经存在的一批视频笔记时，必须按以下顺序执行，不能只修改抽查文件。先用视频原路径重新扫描全部视频和对应 SRT，确认扫描清单中的 `ready` 数量与用户要求的笔记数量一致；缺少字幕、字幕冲突或目标冲突的项目必须先报告，不能用空正文代替。随后逐个读取 SRT 和现有笔记，保留现有标题、标签、媒体软链接以及自动标记区域之外的人工内容，根据字幕主要主题、案例、论证和结论扩充正文。普通课程视频通常生成约 8–15 个正文时间戳段落，短视频按实际内容量减少；正文可使用少量 `###` 主题小标题，但不得新增其他二级标题。
 
-批量更新时只替换 `codex:video-note-summary` 和 `codex:video-note-body` 两个自动区域，不覆盖没有完整标记的旧笔记，也不覆盖普通文件或指向其他源文件的软链接。核心总结保持 3–5 行表格；表格内的 Obsidian 时间戳必须把显示时间分隔符写成 `\\|`，正文内必须使用标准 `|`。所有生成内容先逐篇运行 `validate_note.py`，再提交到 Vault；提交后复查笔记数量、软链接目标、表格链接、正文链接、标题结构和 frontmatter 标签。
+批量更新时只替换 `codex:video-note-summary` 和 `codex:video-note-body` 两个自动区域，不覆盖没有完整标记的旧笔记，也不覆盖普通文件或指向其他源文件的软链接。用户选择 Resource 模板时，再使用 `scripts/apply_resource_template.py` 只更新 frontmatter，不触碰正文和时间戳。核心总结保持 3–5 行表格；表格内的 Obsidian 时间戳必须把显示时间分隔符写成 `\\|`，正文内必须使用标准 `|`。所有生成内容先逐篇运行 `validate_note.py`，再提交到 Vault；提交后复查笔记数量、软链接目标、表格链接、正文链接、标题结构和 frontmatter 标签。
 
 批量更新只允许写入配置的 `notes_folder` 及其 `media_folder`，不得修改扫描源视频、SRT、Vault 中的重复目录或其他笔记目录。重复运行必须是幂等的，不生成重复文件或重复段落。Vault 如果启用了会自动维护 `created`/`updated` 等字段的外部插件，应将其视为 Vault 自动元数据；Skill 不主动新增这些字段，也不把它们当作人工正文区域覆盖。
 
@@ -69,12 +75,23 @@ python3 scripts/obsidian_vault_sync.py scan \
 
 总结框架读取 [summary-frameworks.md](./references/summary-frameworks.md)，根据视频内容选择一个主框架。默认提炼 3–5 个互不重复的核心知识点。
 
-生成 Markdown 时严格使用以下结构：
+生成 Markdown 时，若用户选择 Resource 模板，严格使用以下结构：
 
 ```markdown
 ---
+creator: Komaki Zhu
+original_author:
+cover:
+source:
+type: Resource
+Topic: 用户确认的 Topic
+Subject: 用户确认的 Subject
+status: 用户确认的 status
 tags:
   - 用户指定的标签
+aliases:
+created:
+updated:
 ---
 
 # 标题
@@ -92,7 +109,7 @@ tags:
 对应的自然完整正文段落。
 ```
 
-标题使用视频文件名去除扩展名后的原始名称。只保留三个顶层结构：标题、`## 核心总结` 和 `## 正文`。正文内部可以使用少量 `###` 主题小标题，但不得创建其他 `##` 顶层章节。用户指定标签时，保留标签 YAML frontmatter；除 `tags` 外不擅自增加字段。不要生成底部总结、操作日志或解释性文字。
+标题使用视频文件名去除扩展名后的原始名称。只保留三个顶层结构：标题、`## 核心总结` 和 `## 正文`。正文内部可以使用少量 `###` 主题小标题，但不得创建其他 `##` 顶层章节。用户选择 Resource 模板时，保留模板字段和用户指定 tags；不擅自增加模板之外的字段。用户不使用模板时，按确认结果生成最小 frontmatter。不要生成底部总结、操作日志或解释性文字。
 
 正文中的时间戳必须单独占一行，下一段再写正文；表格中的时间戳仍然是完整的 Obsidian wikilink，但必须把显示时间前的分隔符写成转义形式 `\|`，例如 `[[媒体/视频.mp4#t=251\|04:11]]`，防止 Markdown 表格把它拆成两列。正文中的时间戳使用标准形式 `[[媒体/视频.mp4#t=251|04:11]]`，不要转义。时间戳不能放入任何标题。默认不使用项目符号或编号列表；将字幕中的清单改写成连续自然段。时间戳应放在最能支撑该段内容的语义段落之前，不要机械重复章节起点。
 
