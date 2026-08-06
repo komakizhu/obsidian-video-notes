@@ -1,4 +1,4 @@
 interface:
   display_name: "Obsidian 视频笔记同步器（obsidian-video-notes）"
-  short_description: "扫描视频字幕并同步笔记与媒体软链接"
-  default_prompt: "$obsidian-video-notes：先确认是否套用笔记模板及是否自定义 tags，再根据视频原路径扫描视频和 SRT，在 Obsidian 的视频笔记文件夹中生成带时间戳核心总结和正文，为首次出现的专业名词补充 English 说明，并创建视频软链接。"
+  short_description: "扫描视频字幕并同步笔记与 Obsidian 媒体硬链接"
+  default_prompt: "$obsidian-video-notes：先确认是否套用笔记模板及是否自定义 tags，再根据视频原路径扫描完整视频和 SRT，在 Obsidian 的视频笔记文件夹中生成高信息覆盖率的带时间戳核心总结和正文，逐个保留定义、机制、案例、数字、限制和结论，为首次出现的专业名词补充 English 说明，并创建可被 Obsidian 识别的媒体硬链接。"

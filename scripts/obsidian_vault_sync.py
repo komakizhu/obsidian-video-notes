@@ -23,6 +23,7 @@ DEFAULT_NOTES_FOLDER = "视频笔记"
 DEFAULT_MEDIA_FOLDER = "媒体"
 DEFAULT_SUBTITLE_LANGUAGE = "zh"
 DEFAULT_TAGS: list[str] = []
+DEFAULT_MEDIA_LINK_MODE = "hardlink"
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi"}
 CHINESE_SUFFIXES = (".zh", "_zh", "-zh", ".zh-cn", "_zh-cn", "-zh-cn", ".中文", "_中文", "-中文")
 SUMMARY_START = "<!-- codex:video-note-summary:start -->"
@@ -73,6 +74,11 @@ def load_config(path: Path) -> dict[str, Any]:
     data["subtitle_language"] = str(
         data.get("subtitle_language", DEFAULT_SUBTITLE_LANGUAGE)
     )
+    data["media_link_mode"] = str(
+        data.get("media_link_mode", DEFAULT_MEDIA_LINK_MODE)
+    ).lower()
+    if data["media_link_mode"] not in {"hardlink", "symlink"}:
+        raise ValueError("media_link_mode must be 'hardlink' or 'symlink'")
     raw_tags = data.get("tags", DEFAULT_TAGS)
     if isinstance(raw_tags, str):
         raw_tags = [raw_tags]
@@ -108,6 +114,7 @@ def configure(args: argparse.Namespace) -> int:
         "notes_folder": notes_folder,
         "media_folder": media_folder,
         "subtitle_language": args.subtitle_language,
+        "media_link_mode": args.media_link_mode,
         "tags": [str(tag).strip() for tag in args.tags if str(tag).strip()],
     }
     write_json_atomic(config_path, data)
@@ -314,6 +321,7 @@ def scan(args: argparse.Namespace) -> int:
             "vault_root": config["vault_root"],
             "notes_folder": config["notes_folder"],
             "media_folder": config["media_folder"],
+            "media_link_mode": config["media_link_mode"],
             "tags": config.get("tags", DEFAULT_TAGS),
             "scan_root": str(root),
             "items": items,
@@ -446,9 +454,9 @@ def safe_target(root: Path, relative: str) -> Path:
     relative_path = Path(relative)
     if relative_path.is_absolute() or ".." in relative_path.parts:
         raise ValueError(f"target escapes configured root: {relative}")
-    # Do not resolve the final path component here: an existing media symlink
-    # intentionally resolves outside the Vault to the original video.  The
-    # commit path checks that symlink target separately.
+    # Do not resolve the final path component here: an existing media link may
+    # resolve outside the Vault to the original video. The commit path checks
+    # the link target separately.
     return root / relative_path
 
 
@@ -486,6 +494,11 @@ def commit(args: argparse.Namespace) -> int:
         vault_root = Path(manifest["vault_root"]).expanduser().resolve()
         notes_root = safe_target(vault_root, manifest["notes_folder"])
         media_root = safe_target(notes_root, manifest["media_folder"])
+        media_link_mode = str(
+            manifest.get("media_link_mode", DEFAULT_MEDIA_LINK_MODE)
+        ).lower()
+        if media_link_mode not in {"hardlink", "symlink"}:
+            raise ValueError("manifest media_link_mode must be 'hardlink' or 'symlink'")
         if not vault_root.is_dir():
             raise ValueError(f"Vault directory does not exist: {vault_root}")
         if validate is None:
@@ -524,8 +537,17 @@ def commit(args: argparse.Namespace) -> int:
                 continue
             merged = upsert_tags_frontmatter(merged, manifest.get("tags", []))
             if os.path.lexists(media_target):
-                if not media_target.is_symlink() or media_target.resolve() != source:
-                    report["conflicts"].append({"video": item["video_path"], "target": str(media_target), "reason": "media target exists and is not the expected symlink"})
+                is_expected_symlink = media_target.is_symlink() and media_target.resolve() == source
+                try:
+                    is_expected_hardlink = not media_target.is_symlink() and os.path.samefile(media_target, source)
+                except OSError:
+                    is_expected_hardlink = False
+                if media_link_mode == "symlink":
+                    valid_media = is_expected_symlink
+                else:
+                    valid_media = is_expected_hardlink or is_expected_symlink
+                if not valid_media:
+                    report["conflicts"].append({"video": item["video_path"], "target": str(media_target), "reason": "media target exists and does not point to the expected source"})
                     continue
             prepared.append({"item": item, "source": source, "note_target": note_target, "media_target": media_target, "merged": merged, "note_action": note_action})
 
@@ -534,18 +556,48 @@ def commit(args: argparse.Namespace) -> int:
             return 1
 
         created_links: list[Path] = []
+        replaced_symlinks: list[tuple[Path, Path]] = []
         try:
             for entry in prepared:
-                entry["media_target"].parent.mkdir(parents=True, exist_ok=True)
-                if not os.path.lexists(entry["media_target"]):
-                    os.symlink(str(entry["source"]), str(entry["media_target"]))
-                    created_links.append(entry["media_target"])
+                media_target = entry["media_target"]
+                source = entry["source"]
+                media_target.parent.mkdir(parents=True, exist_ok=True)
+                if not os.path.lexists(media_target):
+                    if media_link_mode == "symlink":
+                        os.symlink(str(source), str(media_target))
+                    else:
+                        os.link(str(source), str(media_target))
+                    created_links.append(media_target)
+                elif media_link_mode == "hardlink" and media_target.is_symlink():
+                    # Migrate a correct legacy symlink to a hard link so
+                    # Obsidian indexes the media as a real vault file.
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", encoding="utf-8", dir=media_target.parent,
+                        prefix=".codex-symlink-backup-", delete=False
+                    ) as backup_handle:
+                        backup = Path(backup_handle.name)
+                    backup.unlink()
+                    os.rename(media_target, backup)
+                    try:
+                        os.link(str(source), str(media_target))
+                    except OSError:
+                        os.rename(backup, media_target)
+                        raise
+                    replaced_symlinks.append((media_target, backup))
                 write_text_atomic(entry["note_target"], entry["merged"])
                 report[entry["note_action"]].append({"video": entry["item"]["video_path"], "note": str(entry["note_target"]), "media": str(entry["media_target"])})
+            for _media_target, backup in replaced_symlinks:
+                if os.path.lexists(backup):
+                    backup.unlink()
         except OSError:
             for link in reversed(created_links):
-                if link.is_symlink():
+                if os.path.lexists(link):
                     link.unlink()
+            for media_target, backup in reversed(replaced_symlinks):
+                if os.path.lexists(media_target):
+                    media_target.unlink()
+                if os.path.lexists(backup):
+                    os.rename(backup, media_target)
             raise
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc))
@@ -564,6 +616,12 @@ def build_parser() -> argparse.ArgumentParser:
     configure_parser.add_argument("--notes-folder", default=DEFAULT_NOTES_FOLDER)
     configure_parser.add_argument("--media-folder", default=DEFAULT_MEDIA_FOLDER)
     configure_parser.add_argument("--subtitle-language", default=DEFAULT_SUBTITLE_LANGUAGE)
+    configure_parser.add_argument(
+        "--media-link-mode",
+        choices=("hardlink", "symlink"),
+        default=DEFAULT_MEDIA_LINK_MODE,
+        help="media links inside the Vault; hardlink is Obsidian-compatible by default",
+    )
     configure_parser.add_argument("--tag", dest="tags", action="append", default=[])
     configure_parser.set_defaults(handler=configure)
 
